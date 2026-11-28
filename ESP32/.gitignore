@@ -1,0 +1,2 @@
+# Local Wi-Fi and Firebase credentials (never commit secrets.h)
+main_code/secrets.h
