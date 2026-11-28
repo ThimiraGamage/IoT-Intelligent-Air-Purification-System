@@ -87,6 +87,7 @@ export interface AppState {
   settings: Settings;
   command: DeviceCommand | null;
   connection: "connected" | "reconnecting" | "offline";
+  telemetrySource: "demo" | "live";
   lastUpdated: string;
   toast: string | null;
 }
@@ -94,7 +95,7 @@ export interface AppActions {
   selectDevice: (id: string) => void;
   sendCommand: (patch: Partial<Device>) => void;
   updateDevice: (id: string, patch: Partial<Device>) => void;
-  addDevice: (name: string, room: string) => void;
+  addDevice: (name: string, room: string, serialNumber?: string) => void;
   markRead: (id?: string) => void;
   deleteNotification: (id: string) => void;
   addRule: (rule: Omit<AutomationRule, "id">) => void;

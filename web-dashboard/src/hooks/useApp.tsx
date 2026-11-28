@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import type { AppContextValue } from "../types";
+import { initialDevices } from "../mock/data";
 import { DemoAirService } from "../services/demoService";
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -34,13 +35,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     media.addEventListener("change", applyTheme);
     return () => media.removeEventListener("change", applyTheme);
   }, [state.settings.theme]);
-  const device = state.devices.find(
-    (item) => item.id === state.selectedDeviceId,
-  )!;
+  const device =
+    state.devices.find((item) => item.id === state.selectedDeviceId) ??
+    state.devices[0] ??
+    initialDevices[0];
   const value: AppContextValue = {
     ...state,
     device,
-    aqi: state.history[state.history.length - 1].aqi,
+    aqi: state.history[state.history.length - 1]?.aqi ?? 0,
     selectDevice: service.selectDevice,
     sendCommand: service.sendCommand,
     updateDevice: service.updateDevice,

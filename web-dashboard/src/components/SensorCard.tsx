@@ -22,10 +22,12 @@ export default function SensorCard({
   reading,
   detailed = false,
   stale = false,
+  live = false,
 }: {
   reading: SensorReading;
   detailed?: boolean;
   stale?: boolean;
+  live?: boolean;
 }) {
   const Icon = icons[reading.key];
   return (
@@ -95,7 +97,9 @@ export default function SensorCard({
           {stale
             ? "Disconnected · last reading retained"
             : reading.available
-              ? "Simulated sensor connected"
+              ? live
+                ? "Live sensor connected"
+                : "Simulated sensor connected"
               : "Sensor not integrated"}
         </div>
       )}

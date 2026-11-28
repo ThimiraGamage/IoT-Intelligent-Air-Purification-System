@@ -8,6 +8,11 @@ export default function Monitoring() {
   const app = useApp();
   const [experimental, setExperimental] = useState(false);
   const stale = !app.device.online || app.connection !== "connected";
+  const isLive = app.telemetrySource === "live";
+  const availableReadings = app.readings.filter((r) => r.available);
+  const unavailableReadings = app.readings.filter((r) => !r.available);
+  const primaryReadings =
+    availableReadings.length > 0 ? availableReadings : app.readings;
   return (
     <div>
       <div className="page-heading">
@@ -31,13 +36,18 @@ export default function Monitoring() {
         <AqiRing value={app.aqi} compact />
         <div>
           <span className="badge green">
-            {stale ? "Last known reading" : "Demo telemetry active"}
+            {stale
+              ? "Last known reading"
+              : isLive
+                ? "Live ESP32 telemetry"
+                : "Presentation telemetry"}
           </span>
           <h2>A little insight into every breath.</h2>
           <p>
-            Seven environmental parameters, one considered view. These are
-            simulated readings from {app.device.name} in your{" "}
-            {app.device.room.toLowerCase()}.
+            {availableReadings.length} active sensor
+            {availableReadings.length === 1 ? "" : "s"} reported from{" "}
+            {app.device.name} in your {app.device.room.toLowerCase()}
+            {isLive ? " via Firebase Realtime Database." : " (simulated)."}
           </p>
           <div className="monitor-meta">
             <span>
@@ -51,20 +61,48 @@ export default function Monitoring() {
         </div>
       </div>
       <div className="sensor-grid monitor-sensor-grid">
-        {app.readings.map((reading) => (
+        {primaryReadings.map((reading) => (
           <SensorCard
             key={reading.key}
             reading={reading}
             detailed
             stale={stale}
+            live={isLive}
           />
         ))}
       </div>
+      {unavailableReadings.length > 0 && availableReadings.length > 0 && (
+        <section className="card" style={{ marginTop: "1rem" }}>
+          <div className="card-header">
+            <div>
+              <h2>Sensors not connected</h2>
+              <p>
+                These parameters are hidden from the live grid until hardware
+                sensors are attached to the ESP32.
+              </p>
+            </div>
+            <span className="badge amber">
+              {unavailableReadings.length} unavailable
+            </span>
+          </div>
+          <div className="sensor-grid monitor-sensor-grid">
+            {unavailableReadings.map((reading) => (
+              <SensorCard
+                key={reading.key}
+                reading={reading}
+                detailed
+                stale={stale}
+                live={isLive}
+              />
+            ))}
+          </div>
+        </section>
+      )}
       <section className="card monitoring-chart">
         <div className="card-header">
           <div>
             <h2>The last two hours</h2>
-            <p>Simulated indoor particulate index. Hover for the details.</p>
+            <p>Indoor particulate index over the last two hours. Hover for details.</p>
           </div>
           <span className="badge green">AQI</span>
         </div>

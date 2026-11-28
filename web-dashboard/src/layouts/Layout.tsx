@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { NavLink, Outlet, Link, useLocation } from "react-router-dom";
+import { NavLink, Outlet, Link, Navigate, useLocation } from "react-router-dom";
+import type { User } from "firebase/auth";
+import { isFirebaseConfigured, subscribeAuthState } from "../services/firebase";
 import {
   Activity,
   BarChart3,
@@ -60,7 +62,17 @@ export default function Layout() {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [help, setHelp] = useState(false);
+  const [authReady, setAuthReady] = useState(!isFirebaseConfigured);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const helpRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    return subscribeAuthState((user) => {
+      setCurrentUser(user);
+      setAuthReady(true);
+    });
+  }, []);
   const unread = app.notifications.filter((n) => !n.read).length;
   const title =
     navigation.flatMap((n) => n.items).find((n) => n.to === location.pathname)
@@ -73,6 +85,25 @@ export default function Layout() {
     if (help) helpRef.current?.showModal();
     else helpRef.current?.close();
   }, [help]);
+
+  if (!authReady) {
+    return (
+      <div className="loading-screen" role="status">
+        <Wind className="loading-icon" size={36} />
+        <span>Loading your Aeris account…</span>
+      </div>
+    );
+  }
+
+  if (
+    isFirebaseConfigured &&
+    currentUser &&
+    app.devices.length === 0 &&
+    location.pathname !== "/devices" &&
+    location.pathname !== "/settings"
+  ) {
+    return <Navigate to="/devices" replace />;
+  }
   return (
     <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""}`}>
       <a href="#main-content" className="skip-link">
@@ -195,7 +226,11 @@ export default function Layout() {
           <div className="topbar-actions">
             <span className="demo-badge">
               <span />
-              Demo mode
+              {!currentUser
+                ? "Presentation · Simulated"
+                : app.telemetrySource === "live"
+                  ? "Live ESP32"
+                  : "Waiting for ESP32"}
             </span>
             <button
               className="icon-button theme-toggle"
@@ -221,13 +256,18 @@ export default function Layout() {
               {unread > 0 && <span />}
             </Link>
             <span className="topbar-divider" />
-            <Link to="/settings" className="profile-link">
+            <Link
+              to={currentUser ? "/settings" : "/login"}
+              className="profile-link"
+            >
               <span className="avatar">
-                {app.settings.name.slice(0, 1).toUpperCase()}
+                {currentUser
+                  ? app.settings.name.slice(0, 1).toUpperCase()
+                  : "?"}
               </span>
               <span>
-                {app.settings.name}
-                <small>My account</small>
+                {currentUser ? app.settings.name : "Guest"}
+                <small>{currentUser ? "My account" : "Sign in"}</small>
               </span>
               <ChevronDown size={13} />
             </Link>
@@ -237,7 +277,7 @@ export default function Layout() {
           <div className="connection-banner" role="status">
             <WifiOff size={16} />
             {app.connection === "reconnecting"
-              ? "Reconnecting to your demo purifier…"
+              ? "Reconnecting to your purifier…"
               : "Purifier disconnected. Displaying the last known readings."}
             <button onClick={app.simulateConnection}>Reconnect</button>
           </div>
@@ -248,7 +288,10 @@ export default function Layout() {
         <footer className="app-footer">
           <span>Thoughtfully made for the air you live in.</span>
           <span>
-            <ShieldCheck size={13} /> Simulated data · Research prototype
+            <ShieldCheck size={13} />{" "}
+            {app.telemetrySource === "live"
+              ? "Live telemetry · Firebase RTDB"
+              : "Connected · Firebase RTDB"}
           </span>
         </footer>
       </div>

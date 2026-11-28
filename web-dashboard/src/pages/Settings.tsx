@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
+import { signOutFirebase } from "../services/firebase";
 import {
   UserRound,
   Bell,
@@ -62,7 +63,7 @@ export default function Settings() {
             </span>
             <div>
               <strong>{settings.name}</strong>
-              <p className="muted">Your personal Aeris demo profile</p>
+              <p className="muted">Your personal Aeris account profile</p>
             </div>
           </div>
           <form onSubmit={save} className="manage-form">
@@ -106,8 +107,8 @@ export default function Settings() {
             </div>
           </form>
           <p className="manage-caption">
-            This browser-local demonstration does not create a secured account.
-            Avoid entering sensitive personal information.
+            Profile and device preferences are saved to your Firebase account
+            when signed in.
           </p>
         </section>
         <section className="card manage-pad">
@@ -208,7 +209,7 @@ export default function Settings() {
           </div>
           <SettingRow
             title="Research participation preference"
-            description="Save whether you would like to share anonymized research data. This demo sends no analytics."
+            description="Save whether you would like to share anonymized research data."
           >
             <Toggle
               label="Research data sharing preference"
@@ -219,8 +220,8 @@ export default function Settings() {
             />
           </SettingRow>
           <SettingRow
-            title="Account demonstration"
-            description="Try the sign-in, registration, and account-recovery screens."
+            title="Account"
+            description="Sign in, create an account, or manage your Firebase session."
           >
             <Link className="button secondary small" to="/login">
               <Smartphone size={15} />
@@ -231,18 +232,18 @@ export default function Settings() {
             <Link
               className="button secondary"
               to="/login"
-              onClick={() => {
-                sessionStorage.removeItem("aeris-demo-session");
-                notify("Demo session ended");
+              onClick={async () => {
+                await signOutFirebase();
+                notify("Signed out");
               }}
             >
               <LogOut size={16} />
-              End demo session
+              Sign out
             </Link>
           </div>
           <p className="manage-caption">
-            Real authentication, account deletion, encrypted cloud storage, and
-            privacy requests require backend integration.
+            Your account settings and registered purifiers sync via Firebase
+            Authentication and Realtime Database.
           </p>
         </section>
       </div>

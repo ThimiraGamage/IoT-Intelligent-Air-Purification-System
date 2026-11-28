@@ -49,9 +49,26 @@ export default function Overview() {
       (_, index, array) =>
         index % Math.max(1, Math.floor(array.length / 70)) === 0,
     );
-  const selectedSensors = app.readings.filter((r) =>
-    ["pm25", "co2", "temperature", "humidity"].includes(r.key),
-  );
+  const availableSensors = app.readings.filter((r) => r.available);
+  const preferredOrder = [
+    "pm25",
+    "pm10",
+    "temperature",
+    "humidity",
+    "pm1",
+    "co2",
+    "tvoc",
+  ];
+  const selectedSensors = (
+    availableSensors.length > 0
+      ? [...availableSensors].sort(
+          (a, b) =>
+            preferredOrder.indexOf(a.key) - preferredOrder.indexOf(b.key),
+        )
+      : app.readings.filter((r) =>
+          ["pm25", "co2", "temperature", "humidity"].includes(r.key),
+        )
+  ).slice(0, 4);
   const modes: { value: Mode; label: string; icon: typeof Leaf }[] = [
     { value: "auto", label: "Auto", icon: Sparkles },
     { value: "sleep", label: "Sleep", icon: Moon },
@@ -153,7 +170,7 @@ export default function Overview() {
                 </strong>
                 <span>
                   {app.command?.status === "pending"
-                    ? "Awaiting demo confirmation"
+                    ? "Awaiting confirmation"
                     : `${d.mode.charAt(0).toUpperCase() + d.mode.slice(1)} mode · Fan speed ${d.fanSpeed}`}
                 </span>
               </div>
@@ -209,7 +226,7 @@ export default function Overview() {
             onClick={() => setShowMethod(!showMethod)}
           >
             <ShieldCheck size={12} />
-            Demo particulate index
+            Particulate index
             <span>{showMethod ? "Hide method" : "How it works"}</span>
           </button>
           {showMethod && (
@@ -279,7 +296,9 @@ export default function Overview() {
             <span>
               {metric === "aqi"
                 ? "Every reading tells a story. Your purifier helps keep it a good one."
-                : "Simulated readings update every 5 seconds."}
+                : app.telemetrySource === "live"
+                  ? "Live ESP32 readings update every 5 seconds."
+                  : "Waiting for live ESP32 readings."}
             </span>
             <Link to="/analytics">
               Explore analytics
@@ -423,7 +442,7 @@ export default function Overview() {
               <ChevronRight size={14} />
             </Link>
           </div>
-          <span className="insight-demo">Demo insight</span>
+          <span className="insight-demo">Air quality insight</span>
         </section>
       </div>
       <div className="overview-data-note">

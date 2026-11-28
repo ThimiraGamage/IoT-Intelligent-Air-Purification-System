@@ -1,7 +1,18 @@
-﻿import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Leaf, ShieldCheck, CheckCircle2, House } from "lucide-react";
+import { Leaf, ShieldCheck, CheckCircle2, House, LogOut } from "lucide-react";
+import type { User } from "firebase/auth";
 import { useApp } from "../hooks/useApp";
+import {
+  isFirebaseConfigured,
+  registerWithFirebase,
+  saveUserProfileInRtdb,
+  sendFirebasePasswordReset,
+  signInWithFirebase,
+  signInWithGoogle,
+  signOutFirebase,
+  subscribeAuthState,
+} from "../services/firebase";
 import "./management.css";
 
 export default function Auth() {
@@ -13,45 +24,92 @@ export default function Auth() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [accepted, setAccepted] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState("");
-  function submit(event: FormEvent) {
+  const [busy, setBusy] = useState(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+
+  useEffect(() => subscribeAuthState(setCurrentUser), []);
+
+  async function handleGoogleSignIn() {
+    setError("");
+    if (!isFirebaseConfigured) {
+      setError(
+        "Firebase is not configured. Add VITE_FIREBASE_* keys to .env.",
+      );
+      return;
+    }
+    setBusy(true);
+    try {
+      const user = await signInWithGoogle();
+      const displayName =
+        user.displayName || user.email?.split("@")[0] || "User";
+      updateSettings({
+        name: displayName,
+        email: user.email || "",
+      });
+      void saveUserProfileInRtdb(user.uid, {
+        name: displayName,
+        email: user.email || "",
+      }).catch(() => {});
+      notify("Signed in with Google");
+      navigate("/devices");
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Google sign-in failed.";
+      setError(
+        msg.includes("auth/unauthorized-domain")
+          ? `Domain "${window.location.hostname}" is not authorized for Google Sign-In. Open http://localhost:5173 or add "${window.location.hostname}" in Firebase Console -> Authentication -> Settings -> Authorized domains.`
+          : msg,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submit(event: FormEvent) {
     event.preventDefault();
     setError("");
-    if (forgot) {
-      setSent(true);
-      return;
-    }
-    if (register && !name.trim()) {
-      setError("Enter your name to create a demo profile.");
-      return;
-    }
-    if (password.length < 8) {
-      setError("Use at least 8 characters for this demo form.");
-      return;
-    }
-    if (register && !accepted) {
-      setError("Confirm that you understand this is a local demonstration.");
-      return;
-    }
-    if (register) updateSettings({ name: name.trim(), email: email.trim() });
-    else updateSettings({ email: email.trim() });
-    try {
-      sessionStorage.setItem(
-        "aeris-demo-session",
-        JSON.stringify({ email: email.trim(), demonstration: true }),
+    if (!isFirebaseConfigured) {
+      setError(
+        "Firebase is not configured. Add VITE_FIREBASE_* keys to .env.",
       );
-    } catch {
-      /* A blocked storage environment can still enter the demo. */
+      return;
     }
-    setPassword("");
-    notify(
-      register
-        ? "Demo profile created locally"
-        : "Entered demonstration session",
-    );
-    navigate("/");
+    setBusy(true);
+    try {
+      if (forgot) {
+        await sendFirebasePasswordReset(email);
+        setSent(true);
+        notify("Password reset email sent");
+        return;
+      }
+      if (register) {
+        if (!name.trim()) {
+          setError("Enter your name to create an account.");
+          return;
+        }
+        const user = await registerWithFirebase(name, email, password);
+        updateSettings({
+          name: user.displayName || name.trim(),
+          email: user.email || email.trim(),
+        });
+        notify("Account created and signed in");
+      } else {
+        const user = await signInWithFirebase(email, password);
+        updateSettings({
+          name: user.displayName || email.split("@")[0] || "User",
+          email: user.email || email.trim(),
+        });
+        notify("Signed in with Firebase");
+      }
+      setPassword("");
+      navigate("/devices");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Authentication failed.");
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <div className="manage-auth">
@@ -85,7 +143,35 @@ export default function Auth() {
       </section>
       <main className="manage-auth-panel">
         <div className="manage-auth-inner" key={location.pathname}>
-          <span className="badge green">Demonstration account</span>
+          <span className="badge green">Firebase account</span>
+          {currentUser && (
+            <div
+              className="card"
+              style={{
+                padding: "0.75rem 1rem",
+                marginBottom: "1rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "0.75rem",
+              }}
+            >
+              <span style={{ fontSize: 13 }}>
+                Signed in as <strong>{currentUser.email}</strong>
+              </span>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={async () => {
+                  await signOutFirebase();
+                  notify("Signed out");
+                }}
+              >
+                <LogOut size={14} />
+                Sign out
+              </button>
+            </div>
+          )}
           <h1>
             {forgot
               ? "A fresh start."
@@ -95,19 +181,18 @@ export default function Auth() {
           </h1>
           <p className="muted">
             {forgot
-              ? "Explore how account recovery will feel when the backend is connected."
+              ? "Enter your email to receive a Firebase password reset link."
               : register
-                ? "Create a local profile to personalize your Aeris demonstration."
-                : "Enter the demonstration and find your fresh-air routine."}
+                ? "Create an Aeris account to register and manage your purifiers."
+                : "Sign in to register your ESP32 purifiers and view live telemetry."}
           </p>
           {sent && forgot ? (
             <div className="manage-confirm" role="status">
               <CheckCircle2 size={30} color="#34714a" />
-              <h3>Recovery flow previewed</h3>
+              <h3>Password reset email sent</h3>
               <p>
-                A production service would send a secure reset link if an
-                account exists for <strong>{email}</strong>. No email was sent
-                in this demonstration.
+                Check your inbox at <strong>{email}</strong> for a link to
+                reset your Aeris password.
               </p>
               <Link
                 className="button primary"
@@ -163,19 +248,6 @@ export default function Auth() {
                   />
                 </label>
               )}
-              {register && (
-                <label className="manage-checkbox-label">
-                  <input
-                    className="manage-checkbox"
-                    type="checkbox"
-                    required
-                    checked={accepted}
-                    onChange={(event) => setAccepted(event.target.checked)}
-                  />
-                  I understand this is a local demo, with no secure account or
-                  cloud authentication.
-                </label>
-              )}
               {!register && !forgot && (
                 <Link
                   to="/forgot-password"
@@ -190,13 +262,25 @@ export default function Auth() {
                   {error}
                 </p>
               )}
-              <button className="button primary" type="submit">
-                {forgot
-                  ? "Preview recovery"
-                  : register
-                    ? "Create demo profile"
-                    : "Enter demo"}
+              <button className="button primary" type="submit" disabled={busy}>
+                {busy
+                  ? "Please wait..."
+                  : forgot
+                    ? "Send reset link"
+                    : register
+                      ? "Create account"
+                      : "Sign in"}
               </button>
+              {!forgot && (
+                <button
+                  type="button"
+                  className="button secondary"
+                  disabled={busy}
+                  onClick={handleGoogleSignIn}
+                >
+                  Continue with Google
+                </button>
+              )}
             </form>
           )}
           <div className="manage-auth-links">
@@ -215,7 +299,7 @@ export default function Auth() {
               <>
                 New around here?{" "}
                 <Link to="/register" onClick={() => setError("")}>
-                  Create a demo profile
+                  Create an account
                 </Link>
               </>
             )}
@@ -229,9 +313,8 @@ export default function Auth() {
               size={16}
               style={{ verticalAlign: "middle", marginRight: 6 }}
             />
-            This is frontend-only authentication for presentation. Any valid
-            email and a password of at least 8 characters enters the demo.
-            Passwords are never stored or sent. Use a made-up password.
+            Sign in with your Aeris account to register purifiers, view live
+            ESP32 readings, and sync your preferences across devices.
           </div>
         </div>
       </main>

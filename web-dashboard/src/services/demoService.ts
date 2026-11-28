@@ -6,8 +6,20 @@ import type {
   Device,
   DeviceCommand,
   HistoryPoint,
+  SensorKey,
   Settings,
 } from "../types";
+import { calculateAqi } from "../utils/aqi";
+import {
+  isFirebaseConfigured,
+  registerUserDeviceInRtdb,
+  saveUserProfileInRtdb,
+  saveUserSettingsInRtdb,
+  subscribeAuthState,
+  subscribeRtdbValue,
+  subscribeUserDevicesInRtdb,
+  subscribeUserSettingsInRtdb,
+} from "./firebase";
 import {
   createHistory,
   initialDevices,
@@ -76,19 +88,25 @@ export class DemoAirService implements AirService, AppActions {
   private ticks = 0;
   private deletedIds: string[] = [];
   private readonly storage: StorageLike | undefined;
+  private liveDevices = new Set<string>();
+  private liveAvailability = new Map<string, Partial<Record<SensorKey, boolean>>>();
+  private rtdbUnsubs = new Map<string, () => void>();
+  private currentUid: string | null = null;
+  private userDevicesUnsub?: () => void;
+  private userSettingsUnsub?: () => void;
 
   constructor(storage: StorageLike | undefined = browserStorage()) {
     this.storage = storage;
     const saved = loadSavedState(storage);
     const devices =
       Array.isArray(saved?.devices) &&
-      saved.devices.length &&
-      saved.devices.every(validDevice)
+        saved.devices.length &&
+        saved.devices.every(validDevice)
         ? saved.devices.map((device) => ({
-            ...initialDevices[0],
-            ...device,
-            uv: device.interlockClosed && device.power ? device.uv : false,
-          }))
+          ...initialDevices[0],
+          ...device,
+          uv: device.interlockClosed && device.power ? device.uv : false,
+        }))
         : initialDevices.map((device) => ({ ...device }));
     const settings = { ...initialSettings };
     const incoming = saved?.settings;
@@ -126,15 +144,15 @@ export class DemoAirService implements AirService, AppActions {
     const history = this.histories.get(selectedDeviceId)!;
     this.deletedIds = Array.isArray(saved?.deletedNotificationIds)
       ? saved.deletedNotificationIds.filter(
-          (value) => typeof value === "string",
-        )
+        (value) => typeof value === "string",
+      )
       : [];
     const readIds = Array.isArray(saved?.readNotificationIds)
       ? saved.readNotificationIds
       : [];
     const notifications =
       Array.isArray(saved?.notifications) &&
-      saved.notifications.every(validNotification)
+        saved.notifications.every(validNotification)
         ? saved.notifications.slice(0, 100)
         : initialNotifications();
     this.state = {
@@ -155,9 +173,139 @@ export class DemoAirService implements AirService, AppActions {
       history,
       command: null,
       connection: selected.online ? "connected" : "offline",
+      telemetrySource: "demo",
       lastUpdated: history[history.length - 1].timestamp,
       toast: null,
     };
+    if (isFirebaseConfigured) {
+      for (const device of devices) {
+        this.subscribeDeviceRtdb(device.id);
+      }
+      subscribeAuthState((user) => {
+        this.userDevicesUnsub?.();
+        this.userDevicesUnsub = undefined;
+        this.userSettingsUnsub?.();
+        this.userSettingsUnsub = undefined;
+        this.currentUid = user?.uid ?? null;
+        if (!user) return;
+        if (!user) {
+          if (import.meta.env.MODE !== "test") {
+            const demoDevices = initialDevices.map((d) => ({ ...d }));
+            for (const d of demoDevices) {
+              if (!this.histories.has(d.id)) {
+                this.histories.set(d.id, createHistory(d.id));
+              }
+            }
+            const firstHistory = this.histories.get(demoDevices[0].id)!;
+            this.emit({
+              devices: demoDevices,
+              selectedDeviceId: demoDevices[0].id,
+              history: firstHistory,
+              readings: readingsFromHistory(firstHistory, true),
+              telemetrySource: "demo",
+              connection: "connected",
+              lastUpdated: firstHistory[firstHistory.length - 1].timestamp,
+            });
+          }
+          return;
+        }
+        void saveUserProfileInRtdb(user.uid, {
+          name: user.displayName || this.state.settings.name,
+          email: user.email || this.state.settings.email,
+        }).catch(() => { });
+        this.userSettingsUnsub = subscribeUserSettingsInRtdb<Settings>(
+          user.uid,
+          (cloudSettings) => {
+            const nextSettings: Settings = { ...this.state.settings };
+            if (typeof cloudSettings.name === "string")
+              nextSettings.name = cloudSettings.name.slice(0, 80);
+            if (typeof cloudSettings.email === "string")
+              nextSettings.email = cloudSettings.email.slice(0, 200);
+            if (
+              cloudSettings.theme &&
+              ["light", "dark", "system"].includes(cloudSettings.theme)
+            )
+              nextSettings.theme = cloudSettings.theme;
+            if (
+              cloudSettings.language &&
+              ["en", "si"].includes(cloudSettings.language)
+            )
+              nextSettings.language = cloudSettings.language;
+            if (
+              typeof cloudSettings.tariff === "number" &&
+              Number.isFinite(cloudSettings.tariff) &&
+              cloudSettings.tariff >= 0
+            )
+              nextSettings.tariff = cloudSettings.tariff;
+            if (
+              typeof cloudSettings.currency === "string" &&
+              cloudSettings.currency.length <= 8
+            )
+              nextSettings.currency = cloudSettings.currency;
+            if (typeof cloudSettings.notifications === "boolean")
+              nextSettings.notifications = cloudSettings.notifications;
+            if (typeof cloudSettings.emailNotifications === "boolean")
+              nextSettings.emailNotifications =
+                cloudSettings.emailNotifications;
+            if (typeof cloudSettings.analyticsConsent === "boolean")
+              nextSettings.analyticsConsent = cloudSettings.analyticsConsent;
+            this.emit({ settings: nextSettings }, true);
+          },
+        );
+        this.userDevicesUnsub = subscribeUserDevicesInRtdb(
+          user.uid,
+          (cloudDevices) => {
+            const nextDevices: Device[] = cloudDevices.map((cd) => {
+              const existing = this.state.devices.find((d) => d.id === cd.id);
+              if (existing) {
+                return { ...existing, name: cd.name, room: cd.room };
+              }
+              return {
+                ...initialDevices[0],
+                id: cd.id,
+                name: cd.name,
+                room: cd.room,
+                online: false,
+                operatingHours: 0,
+                filterLife: 100,
+              };
+            });
+            for (const d of nextDevices) {
+              if (!this.histories.has(d.id)) {
+                this.histories.set(d.id, createHistory(d.id));
+              }
+              this.subscribeDeviceRtdb(d.id);
+            }
+            const nextSelectedId = nextDevices.some(
+              (d) => d.id === this.state.selectedDeviceId,
+            )
+              ? this.state.selectedDeviceId
+              : (nextDevices[0]?.id ?? "");
+            const nextHistory = nextSelectedId
+              ? (this.histories.get(nextSelectedId) ?? this.state.history)
+              : this.state.history;
+            const nextSelected = nextDevices.find(
+              (d) => d.id === nextSelectedId,
+            );
+            this.emit(
+              {
+                devices: nextDevices,
+                selectedDeviceId: nextSelectedId,
+                history: nextHistory,
+                readings: nextSelected
+                  ? readingsFromHistory(
+                      nextHistory,
+                      nextSelected.online,
+                      this.liveAvailability.get(nextSelected.id),
+                    )
+                  : readingsFromHistory(nextHistory, false),
+              },
+              true,
+            );
+          },
+        );
+      });
+    }
   }
 
   getSnapshot = () => this.state;
@@ -232,6 +380,98 @@ export class DemoAirService implements AirService, AppActions {
     );
   }
 
+  private subscribeDeviceRtdb(deviceId: string) {
+    if (this.rtdbUnsubs.has(deviceId)) return;
+    try {
+      const unsub = subscribeRtdbValue<{
+        updatedAt?: string;
+        sensors?: Partial<Record<SensorKey, number | null>>;
+        available?: Partial<Record<SensorKey, boolean>>;
+      }>(
+        `devices/${deviceId}/live`,
+        (payload) => {
+          if (!payload || typeof payload !== "object" || !payload.sensors) return;
+          const sensors = payload.sensors;
+          const availability: Partial<Record<SensorKey, boolean>> = {
+            pm1: payload.available?.pm1 ?? typeof sensors.pm1 === "number",
+            pm25: payload.available?.pm25 ?? typeof sensors.pm25 === "number",
+            pm10: payload.available?.pm10 ?? typeof sensors.pm10 === "number",
+            co2: payload.available?.co2 ?? typeof sensors.co2 === "number",
+            tvoc: payload.available?.tvoc ?? typeof sensors.tvoc === "number",
+            temperature:
+              payload.available?.temperature ??
+              typeof sensors.temperature === "number",
+            humidity:
+              payload.available?.humidity ?? typeof sensors.humidity === "number",
+          };
+          const pm25 = typeof sensors.pm25 === "number" ? sensors.pm25 : 0;
+          const pm10 = typeof sensors.pm10 === "number" ? sensors.pm10 : 0;
+          const timestamp =
+            typeof payload.updatedAt === "string" &&
+              Number.isFinite(Date.parse(payload.updatedAt))
+              ? payload.updatedAt
+              : new Date().toISOString();
+          const device = this.state.devices.find((d) => d.id === deviceId);
+          if (!device) return;
+          const fan =
+            device.mode === "turbo"
+              ? 5
+              : device.mode === "sleep" || device.mode === "eco"
+                ? 1
+                : device.fanSpeed;
+          const point: HistoryPoint = {
+            timestamp,
+            pm1: typeof sensors.pm1 === "number" ? sensors.pm1 : 0,
+            pm25,
+            pm10,
+            co2: typeof sensors.co2 === "number" ? sensors.co2 : 0,
+            tvoc: typeof sensors.tvoc === "number" ? sensors.tvoc : 0,
+            temperature:
+              typeof sensors.temperature === "number" ? sensors.temperature : 0,
+            humidity:
+              typeof sensors.humidity === "number" ? sensors.humidity : 0,
+            aqi: calculateAqi(pm25, pm10),
+            power: device.power
+              ? Math.round((5 + fan * 5.4 + (device.uv ? 3 : 0)) * 10) / 10
+              : 0.4,
+          };
+          this.liveDevices.add(deviceId);
+          this.liveAvailability.set(deviceId, availability);
+          const history = [...(this.histories.get(deviceId) ?? []), point].slice(
+            -2200,
+          );
+          this.histories.set(deviceId, history);
+          const devices = this.state.devices.map((d) =>
+            d.id === deviceId ? { ...d, online: true } : d,
+          );
+          if (deviceId === this.state.selectedDeviceId) {
+            this.emit({
+              devices,
+              history,
+              readings: readingsFromHistory(history, true, availability),
+              telemetrySource: "live",
+              connection: "connected",
+              lastUpdated: timestamp,
+            });
+            this.evaluateRules(
+              devices.find((d) => d.id === deviceId)!,
+              point,
+              Date.now(),
+            );
+          } else {
+            this.emit({ devices });
+          }
+        },
+        () => {
+          // Keep local demo fallback active if RTDB listener errors
+        },
+      );
+      this.rtdbUnsubs.set(deviceId, unsub);
+    } catch {
+      // Ignore if RTDB is unavailable in test/offline environments
+    }
+  }
+
   /** Public for deterministic simulation tests; production interval calls every 5s. */
   tick = () => {
     this.ticks++;
@@ -253,6 +493,7 @@ export class DemoAirService implements AirService, AppActions {
     for (const device of devices) {
       if (
         !device.online ||
+        this.liveDevices.has(device.id) ||
         (device.id === this.state.selectedDeviceId &&
           this.state.connection !== "connected")
       )
@@ -267,7 +508,7 @@ export class DemoAirService implements AirService, AppActions {
             Date.parse(point.timestamp) >= cutoff ||
             index === 0 ||
             Math.floor(Date.parse(point.timestamp) / 300000) !==
-              Math.floor(Date.parse(next[index - 1].timestamp) / 300000),
+            Math.floor(Date.parse(next[index - 1].timestamp) / 300000),
         );
         this.histories.set(
           device.id,
@@ -279,7 +520,8 @@ export class DemoAirService implements AirService, AppActions {
     }
     const selected = devices.find(
       (device) => device.id === this.state.selectedDeviceId,
-    )!;
+    );
+    if (!selected) return;
     const history = this.histories.get(selected.id)!;
     const latest = history[history.length - 1];
     this.emit({
@@ -288,7 +530,9 @@ export class DemoAirService implements AirService, AppActions {
       readings: readingsFromHistory(
         history,
         selected.online && this.state.connection === "connected",
+        this.liveAvailability.get(selected.id),
       ),
+      telemetrySource: this.liveDevices.has(selected.id) ? "live" : "demo",
       lastUpdated: latest.timestamp,
     });
     this.evaluateRules(selected, latest, now);
@@ -328,7 +572,12 @@ export class DemoAirService implements AirService, AppActions {
       {
         selectedDeviceId: deviceId,
         history,
-        readings: readingsFromHistory(history, device.online),
+        readings: readingsFromHistory(
+          history,
+          device.online,
+          this.liveAvailability.get(deviceId),
+        ),
+        telemetrySource: this.liveDevices.has(deviceId) ? "live" : "demo",
         lastUpdated: history[history.length - 1].timestamp,
         connection: device.online
           ? "connected"
@@ -343,6 +592,7 @@ export class DemoAirService implements AirService, AppActions {
 
   sendCommand = (patch: Partial<Device>) => {
     const device = this.selected();
+    if (!device) return;
     if (this.deviceCommands.get(device.id)?.status === "pending") {
       this.notify(
         "This device already has a command awaiting a simulated acknowledgement.",
@@ -432,7 +682,8 @@ export class DemoAirService implements AirService, AppActions {
     );
     const selected = devices.find(
       (device) => device.id === this.state.selectedDeviceId,
-    )!;
+    );
+    if (!selected) return;
     this.emit(
       {
         devices,
@@ -441,14 +692,29 @@ export class DemoAirService implements AirService, AppActions {
           : this.recoveringDevices.has(selected.id)
             ? "reconnecting"
             : "offline",
-        readings: readingsFromHistory(this.state.history, selected.online),
+        readings: readingsFromHistory(
+          this.state.history,
+          selected.online,
+          this.liveAvailability.get(selected.id),
+        ),
       },
       true,
     );
+    if (this.currentUid && /^AERIS-[A-F0-9]{8,12}$/i.test(deviceId)) {
+      const updated = devices.find((d) => d.id === deviceId);
+      if (updated) {
+        void registerUserDeviceInRtdb(this.currentUid, {
+          id: updated.id,
+          name: updated.name,
+          room: updated.room,
+          serialNumber: updated.id,
+        }).catch(() => { });
+      }
+    }
     this.notify("Device details updated locally.");
   };
 
-  addDevice = (name: string, room: string) => {
+  addDevice = (name: string, room: string, serialNumber?: string) => {
     if (!name.trim() || !room.trim()) {
       this.notify("Enter a device name and room.");
       return;
@@ -457,9 +723,21 @@ export class DemoAirService implements AirService, AppActions {
       this.notify("The demo supports up to 12 devices.");
       return;
     }
+    const normalizedSerial = serialNumber?.trim().toUpperCase();
+    const isHardwareSerial =
+      typeof normalizedSerial === "string" &&
+      /^AERIS-[A-F0-9]{8,12}$/.test(normalizedSerial);
+    if (
+      isHardwareSerial &&
+      this.state.devices.some((d) => d.id === normalizedSerial)
+    ) {
+      this.selectDevice(normalizedSerial);
+      this.notify(`Device ${normalizedSerial} is already paired.`);
+      return;
+    }
     const device: Device = {
       ...initialDevices[0],
-      id: id(),
+      id: isHardwareSerial ? normalizedSerial : id(),
       name: name.trim().slice(0, 60),
       room: room.trim().slice(0, 60),
       operatingHours: 0,
@@ -467,9 +745,14 @@ export class DemoAirService implements AirService, AppActions {
     };
     this.histories.set(device.id, createHistory(device.id));
     this.emit({ devices: [...this.state.devices, device] }, true);
+    if (isHardwareSerial && isFirebaseConfigured) {
+      this.subscribeDeviceRtdb(device.id);
+    }
     this.selectDevice(device.id);
     this.notify(
-      "Demo pairing complete. No Wi-Fi credentials were requested or stored.",
+      isHardwareSerial
+        ? `ESP32 device ${device.id} paired.`
+        : "Demo pairing complete. No Wi-Fi credentials were requested or stored.",
     );
   };
   markRead = (notificationId?: string) =>
@@ -532,6 +815,9 @@ export class DemoAirService implements AirService, AppActions {
     )
       return;
     this.emit({ settings: next }, true);
+    if (this.currentUid) {
+      void saveUserSettingsInRtdb(this.currentUid, next).catch(() => { });
+    }
   };
   resetFilter = () => {
     this.emit(
@@ -557,6 +843,7 @@ export class DemoAirService implements AirService, AppActions {
     if (this.recoveringDevices.has(deviceId)) return;
     this.recoveringDevices.add(deviceId);
     const original = this.selected();
+    if (!original) return;
     this.emit({
       connection: "offline",
       devices: this.state.devices.map((device) =>

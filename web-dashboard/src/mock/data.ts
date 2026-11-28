@@ -247,6 +247,7 @@ function sensorStatus(key: SensorKey, value: number): string {
 export function readingsFromHistory(
   history: HistoryPoint[],
   online = true,
+  availability?: Partial<Record<SensorKey, boolean>>,
 ): SensorReading[] {
   const latest = history[history.length - 1];
   const hourAgo = Date.parse(latest.timestamp) - 3600000;
@@ -258,19 +259,22 @@ export function readingsFromHistory(
         : nearest,
     history[0],
   );
-  return (Object.keys(sensorMeta) as SensorKey[]).map((key) => ({
-    key,
-    ...sensorMeta[key],
-    value: latest[key],
-    status: online ? sensorStatus(key, latest[key]) : "Unavailable",
-    trend:
-      previous[key] === 0
-        ? 0
-        : round(
-            ((latest[key] - previous[key]) / Math.abs(previous[key])) * 100,
-          ),
-    available: online,
-    updatedAt: latest.timestamp,
-    history: history.slice(-24).map((point) => point[key]),
-  }));
+  return (Object.keys(sensorMeta) as SensorKey[]).map((key) => {
+    const available = online && (availability?.[key] ?? true);
+    return {
+      key,
+      ...sensorMeta[key],
+      value: latest[key],
+      status: available ? sensorStatus(key, latest[key]) : "Unavailable",
+      trend:
+        previous[key] === 0
+          ? 0
+          : round(
+              ((latest[key] - previous[key]) / Math.abs(previous[key])) * 100,
+            ),
+      available,
+      updatedAt: latest.timestamp,
+      history: history.slice(-24).map((point) => point[key]),
+    };
+  });
 }
